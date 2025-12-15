@@ -1,9 +1,9 @@
-name: Build and Release
+name: Build VDM nRF Fork
 
 on:
-  workflow_dispatch: {}
   push:
-    branches: [ "main", "master" ]
+    branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,52 +13,65 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
 
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
+    - name: Install Chocolatey
+      shell: pwsh
+      run: |
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
 
-      - name: Restore NuGet
-        run: nuget restore
+    - name: Install .NET Framework 4.6.1 Dev Pack
+      shell: pwsh
+      run: |
+        choco install netfx-4.6.1-devpack -y --no-progress
 
-      - name: Build Release (Any CPU)
-        run: msbuild "PSMSVirtualDeviceManager.sln" /m /p:Configuration=Release /p:Platform="Any CPU"
+    - name: Verify .NET 4.6.1 reference assemblies
+      shell: pwsh
+      run: |
+        $path = "C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.6.1"
+        if (!(Test-Path $path)) { throw "Missing .NET 4.6.1 reference assemblies" }
 
-      - name: Package Release Output
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
 
-          $exe = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter "PSMSVirtualDeviceManager.exe" |
-                 Where-Object { $_.FullName -notmatch '\\obj\\' } |
-                 Select-Object -First 1
+    - name: Restore NuGet packages
+      run: nuget restore PSMSVirtualDeviceManager.sln
 
-          if (-not $exe) { throw "Could not find PSMSVirtualDeviceManager.exe in build output." }
+    - name: Build Release x64
+      run: |
+        msbuild PSMSVirtualDeviceManager.sln `
+          /m `
+          /p:Configuration=Release `
+          /p:Platform=x64
 
-          $binDir = Split-Path $exe.FullName -Parent
-          Write-Host "Found EXE at: $($exe.FullName)"
-          Write-Host "Packaging folder: $binDir"
+    - name: Generate version number
+      id: version
+      shell: pwsh
+      run: |
+        $date = Get-Date -Format "yyyy.MM.dd"
+        $run = "${{ github.run_number }}"
+        $version = "$date.$run"
+        echo "version=$version" >> $env:GITHUB_OUTPUT
 
-          $tag = "v0.0.${{ github.run_number }}"
-          echo "TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+    - name: Package build output
+      shell: pwsh
+      run: |
+        $out = "release"
+        New-Item -ItemType Directory -Force -Path $out
+        Copy-Item "PSMSVirtualDeviceManager\bin\x64\Release\*" $out -Recurse -Force
+        Compress-Archive -Path "$out\*" -DestinationPath "VDM-nRF-${{ steps.version.outputs.version }}.zip"
 
-          $zipPath = Join-Path $env:GITHUB_WORKSPACE "PSMSVirtualDeviceManager-$tag.zip"
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-
-          Compress-Archive -Path (Join-Path $binDir "*") -DestinationPath $zipPath -Force
-
-      - name: Create GitHub Release and Upload ZIP
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $tag = "${{ env.TAG }}"
-          $zip = Join-Path $env:GITHUB_WORKSPACE "PSMSVirtualDeviceManager-$tag.zip"
-          if (-not (Test-Path $zip)) { throw "Zip not found at: $zip" }
-
-          gh release create $tag $zip --title "PSMSVirtualDeviceManager $tag" --generate-notes
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        name: VDM nRF Build v${{ steps.version.outputs.version }}
+        files: VDM-nRF-${{ steps.version.outputs.version }}.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
