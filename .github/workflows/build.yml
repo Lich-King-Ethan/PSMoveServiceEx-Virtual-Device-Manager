@@ -1,11 +1,8 @@
-name: Build & Release (VDM)
+name: Build and Release
 
 on:
   push:
-    branches:
-      - master
-      - main
-  workflow_dispatch:
+    branches: [ "main" ]
 
 permissions:
   contents: write
@@ -17,66 +14,62 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install build prerequisites (Chocolatey)
-        shell: powershell
-        run: |
-          choco install -y nuget.commandline
-          choco install -y netfx-4.6.1-devpack
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: NuGet restore
-        shell: powershell
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet
+        run: nuget restore
+
+      # Build EXACTLY what your CLI log shows you were building:
+      #   Configuration=Release, Platform="Any CPU"
+      # This repo still outputs to bin\x64\Release because the vbproj is set up that way.
+      - name: Build Release (Any CPU)
+        run: msbuild "PSMSVirtualDeviceManager.sln" /m /p:Configuration=Release /p:Platform="Any CPU"
+
+      - name: Package Release Output
+        shell: pwsh
         run: |
-          nuget restore ".\PSMSVirtualDeviceManager.sln"
+          $ErrorActionPreference = "Stop"
 
-      - name: Build (Release|x64)
-        shell: powershell
+          # Find the built EXE anywhere under the workspace (handles weird output paths)
+          $exe = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter "PSMSVirtualDeviceManager.exe" |
+                 Where-Object { $_.FullName -notmatch '\\obj\\' } |
+                 Select-Object -First 1
+
+          if (-not $exe) {
+            throw "Could not find PSMSVirtualDeviceManager.exe in build output."
+          }
+
+          $binDir = Split-Path $exe.FullName -Parent
+          Write-Host "Found EXE at: $($exe.FullName)"
+          Write-Host "Packaging folder: $binDir"
+
+          $tag = "v0.0.${{ github.run_number }}"
+          echo "TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "PSMSVirtualDeviceManager-$tag.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+
+          Compress-Archive -Path (Join-Path $binDir "*") -DestinationPath $zipPath -Force
+
+      - name: Create GitHub Release and Upload ZIP
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          msbuild ".\PSMSVirtualDeviceManager.sln" /m /p:Configuration=Release /p:Platform=x64
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ env.TAG }}"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "PSMSVirtualDeviceManager-$tag.zip"
 
-      - name: Package (CreateRelease.bat)
-        shell: cmd
-        run: |
-          cd PSMSVirtualDeviceManager
-          call CreateRelease.bat
+          if (-not (Test-Path $zip)) {
+            throw "Zip not found at: $zip"
+          }
 
-      - name: Find release zip
-        id: pkg
-        shell: powershell
-        run: |
-          $dir = "PSMSVirtualDeviceManager\bin\x64\Release\_RELEASE"
-          if (!(Test-Path $dir)) { throw "Expected release folder not found: $dir" }
-
-          $zip = Get-ChildItem -Path $dir -Filter "*.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $zip) { throw "No .zip found in: $dir" }
-
-          "zip_path=$($zip.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "zip_name=$($zip.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-      - name: Upload artifact (zip)
-        uses: actions/upload-artifact@v4
-        with:
-          name: PSMSVirtualDeviceManager_ReleaseZip
-          path: ${{ steps.pkg.outputs.zip_path }}
-
-      - name: Compute release tag
-        id: rel
-        shell: powershell
-        run: |
-          # Monotonic version: vdm-v#### (#### is GitHub run number)
-          $tag = "vdm-v$($env:GITHUB_RUN_NUMBER)"
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-      - name: Create GitHub Release + attach zip
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ steps.rel.outputs.tag }}
-          name: ${{ steps.rel.outputs.tag }}
-          generateReleaseNotes: true
-          makeLatest: true
-          artifacts: ${{ steps.pkg.outputs.zip_path }}
+          # Create release (fails if tag already exists)
+          gh release create $tag $zip `
+            --title "PSMSVirtualDeviceManager $tag" `
+            --generate-notes
