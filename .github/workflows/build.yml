@@ -1,8 +1,9 @@
 name: Build and Release
 
 on:
+  workflow_dispatch: {}
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
 
 permissions:
   contents: write
@@ -24,9 +25,6 @@ jobs:
       - name: Restore NuGet
         run: nuget restore
 
-      # Build EXACTLY what your CLI log shows you were building:
-      #   Configuration=Release, Platform="Any CPU"
-      # This repo still outputs to bin\x64\Release because the vbproj is set up that way.
       - name: Build Release (Any CPU)
         run: msbuild "PSMSVirtualDeviceManager.sln" /m /p:Configuration=Release /p:Platform="Any CPU"
 
@@ -35,14 +33,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          # Find the built EXE anywhere under the workspace (handles weird output paths)
           $exe = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter "PSMSVirtualDeviceManager.exe" |
                  Where-Object { $_.FullName -notmatch '\\obj\\' } |
                  Select-Object -First 1
 
-          if (-not $exe) {
-            throw "Could not find PSMSVirtualDeviceManager.exe in build output."
-          }
+          if (-not $exe) { throw "Could not find PSMSVirtualDeviceManager.exe in build output." }
 
           $binDir = Split-Path $exe.FullName -Parent
           Write-Host "Found EXE at: $($exe.FullName)"
@@ -64,12 +59,6 @@ jobs:
           $ErrorActionPreference = "Stop"
           $tag = "${{ env.TAG }}"
           $zip = Join-Path $env:GITHUB_WORKSPACE "PSMSVirtualDeviceManager-$tag.zip"
+          if (-not (Test-Path $zip)) { throw "Zip not found at: $zip" }
 
-          if (-not (Test-Path $zip)) {
-            throw "Zip not found at: $zip"
-          }
-
-          # Create release (fails if tag already exists)
-          gh release create $tag $zip `
-            --title "PSMSVirtualDeviceManager $tag" `
-            --generate-notes
+          gh release create $tag $zip --title "PSMSVirtualDeviceManager $tag" --generate-notes
