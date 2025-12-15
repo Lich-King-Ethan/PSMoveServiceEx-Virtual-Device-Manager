@@ -1,0 +1,82 @@
+name: Build & Release (VDM)
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build prerequisites (Chocolatey)
+        shell: powershell
+        run: |
+          choco install -y nuget.commandline
+          choco install -y netfx-4.6.1-devpack
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: NuGet restore
+        shell: powershell
+        run: |
+          nuget restore ".\PSMSVirtualDeviceManager.sln"
+
+      - name: Build (Release|x64)
+        shell: powershell
+        run: |
+          msbuild ".\PSMSVirtualDeviceManager.sln" /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Package (CreateRelease.bat)
+        shell: cmd
+        run: |
+          cd PSMSVirtualDeviceManager
+          call CreateRelease.bat
+
+      - name: Find release zip
+        id: pkg
+        shell: powershell
+        run: |
+          $dir = "PSMSVirtualDeviceManager\bin\x64\Release\_RELEASE"
+          if (!(Test-Path $dir)) { throw "Expected release folder not found: $dir" }
+
+          $zip = Get-ChildItem -Path $dir -Filter "*.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $zip) { throw "No .zip found in: $dir" }
+
+          "zip_path=$($zip.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "zip_name=$($zip.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload artifact (zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PSMSVirtualDeviceManager_ReleaseZip
+          path: ${{ steps.pkg.outputs.zip_path }}
+
+      - name: Compute release tag
+        id: rel
+        shell: powershell
+        run: |
+          # Monotonic version: vdm-v#### (#### is GitHub run number)
+          $tag = "vdm-v$($env:GITHUB_RUN_NUMBER)"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Create GitHub Release + attach zip
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.rel.outputs.tag }}
+          name: ${{ steps.rel.outputs.tag }}
+          generateReleaseNotes: true
+          makeLatest: true
+          artifacts: ${{ steps.pkg.outputs.zip_path }}
